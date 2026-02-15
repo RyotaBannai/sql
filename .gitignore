@@ -1,0 +1,6 @@
+make_json.sql
+.DS_Store
+.idea/
+*.iml
+*.log
+*.tmp
