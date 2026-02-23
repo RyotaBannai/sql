@@ -105,3 +105,73 @@ inner join  (
     select 'newcomer' level, 0 min_roles, 19 max_roles) lvl_t
     on cnt_t.cnt between lvl_t.min_roles and lvl_t.max_roles;
 
+select f.film_id, f.title, i.inventory_id
+from film f
+    inner join inventory i
+    on f.film_id = i.film_id
+where f.film_id between 13 and 15;
+
+
+# select f.film_id, f.title
+# from film f;
+
+
+select tbl.table_name,
+    (select count(*)
+    from information_schema.STATISTICS sta
+    where sta.table_schema = tbl.table_schema
+      and sta.TABLE_NAME = tbl.TABLE_NAME) num_indexes
+from information_schema.TABLES tbl
+where tbl.TABLE_SCHEMA = 'sakila'
+  and tbl.TABLE_TYPE = 'BASE TABLE'
+ORDER BY 1;
+
+# 動的SQL
+set @qry = 'select customer_id, first_name, last_name from customer;'
+prepare dynsql1 from @qry;
+execute dynsql1;
+deallocate prepare dynsql1;
+
+# sakilaスキーマのインデックスを全てリストアップする
+select sta.TABLE_NAME, sta.INDEX_NAME
+from (select *
+from information_schema.tables tbl
+where tbl.TABLE_SCHEMA = 'sakila'
+and tbl.TABLE_TYPE = 'BASE TABLE') tables
+left join information_schema.STATISTICS sta
+on sta.TABLE_NAME = tables.TABLE_NAME;
+
+
+WITH idx_info AS (
+  SELECT
+    table_name,
+    index_name,
+    column_name,
+    seq_in_index,
+    MAX(seq_in_index) OVER (PARTITION BY table_name, index_name) AS num_columns
+  FROM information_schema.statistics
+  WHERE table_schema = 'sakila'
+    AND table_name = 'customer'
+)
+SELECT CONCAT(
+         CASE
+           WHEN seq_in_index = 1 THEN
+             CONCAT('ALTER TABLE ', table_name, ' ADD INDEX ', index_name, ' (', column_name)
+           ELSE
+             CONCAT(', ', column_name)
+         END,
+         CASE
+           WHEN seq_in_index = num_columns THEN ');'
+           ELSE ''
+         END
+       ) AS index_creation_statement
+FROM idx_info
+ORDER BY index_name, seq_in_index;
+
+
+# 解析関数 in action
+select monthname(payment_date) payment_month,
+    sum(amount) month_total,
+    round(sum(amount)/sum(sum(amount))  over () * 100,2) pct_of_total
+from payment
+group by monthname(payment_date)
