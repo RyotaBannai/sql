@@ -2,7 +2,8 @@
 
 ### Misc
 
-- start server `brew services start postgresql` -> `psql postgres`
+- start server `brew services start postgresql` 
+- replに入る：`psql postgres`
 - stop `brew services stop postgresql`
 - list databases `\list` or `\l`
 - choose database `\c [database name]`
