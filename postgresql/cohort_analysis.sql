@@ -251,3 +251,240 @@ order by 1,2,3
 --         from legislators_terms) c on c.id_bioguide = a.id_bioguide
 -- where c.first_term between '1917-01-01' and '1999-12-31'
 -- and c.first_state = 'AL' and b.gender = 'F'
+
+
+-- 開始値以外の値をコホートにするコホート分析（ここでは、在籍途中からコホートにする。ミッドターム分析）
+-- 本例以外にも、あるエンティティがある閾値（ある購入回数やある消費額など）に達した後のリテンションを分析する、など考えられる。
+with all_legislators_2000 as (
+    -- legislators_termsには同じ議員が複数存在。
+    -- 同じ議員が複数行ある場合は、いずれかが条件を満たしていれば取り出す。
+    select
+        distinct id_bioguide,
+                 term_type,
+                 date('2000-01-01') as first_term,
+                 min(term_start) as min_start -- いつから在任しているか
+    from legislators_terms
+    where term_start <= '2000-12-31'
+      and term_end >= '2000-01-01'
+        -- 初めはレンジの日付設定が逆では？と考えたが、
+        -- 2000年台に就任しているかどうかをみたいため、正しい。
+        -- またterm_start<=term_endであることが前提。
+    group by 1,2,3
+/*
+id_bioguide,term_type,first_term,min_start
+H001014,rep,2000-01-01,1999-01-06
+K000259,rep,2000-01-01,1999-01-06
+K000210,rep,2000-01-01,1999-01-06
+B000944,rep,2000-01-01,1999-01-06
+J000072,sen,2000-01-01,1995-01-04
+*/
+), aa as (
+    select
+        a.term_type,
+        coalesce(date_part('year', age(c.date, a.first_term)), 0) period, -- 留任年数
+        count(distinct a.id_bioguide) cohort_retained -- 在任数
+    from all_legislators_2000 as a
+    join legislators_terms b on a.id_bioguide = b.id_bioguide
+        and b.term_start >= a.min_start
+        -- ここ重要
+        -- 「all_legislators_2000」におけるフィルタは2000年度に在任していた行のみ。
+        -- 同議員であってもmin_startより前に就任していた期間はの行は集計対象外。
+        -- 一方でmin_start以降の在任期間は全て主計対象に含める。
+        -- これは「2000年台に在任」コホートを作ってmin_startから各議員の任期期間を計算したいためであり、min_start以降の在任については「いつまで在任していたか」を計算するために全て集計対象とする必要があるため。
+    left join date_dim c
+        on c.date between b.term_start and b.term_end -- 任期開始日と終了日の年度を全てjoinする(つまり人気期間中の年度分の行を作成する)
+        and c.month_name = 'December' and c.day_of_month = 31 -- ただし、その１年分は12/31だけ残す
+        and c.year >= 2000
+    group by 1, 2
+    )
+/*
+term_type,period,cohort_retained
+rep,0,440
+rep,1,392
+rep,2,389
+rep,3,340
+rep,4,338
+...
+*/
+-- select *
+-- from aa;
+select
+    term_type,
+    period,
+    first_value(cohort_retained) over (partition by term_type order by period) cohort_size,
+    cohort_retained,
+    cohort_retained * 1.0 / first_value(cohort_retained) over (partition by term_type order by period) pct_retained
+from aa;
+/*
+term_type,period,cohort_size,cohort_retained,pct_retained
+rep,0,440,440,1
+rep,1,440,392,0.89090909090909090909
+rep,2,440,389,0.88409090909090909091
+rep,3,440,340,0.77272727272727272727
+rep,4,440,338,0.76818181818181818182
+rep,5,440,308,0.7
+*/
+
+
+select
+    first_century,
+    count(distinct id_bioguide) cohort_size,
+    count(distinct case when total_terms >= 5 then id_bioguide end) survived_5,
+    count(distinct case when total_terms >= 5 then id_bioguide end) * 1.0 / count(distinct id_bioguide) pct_survived_t_terms -- 全体の中でどれくらいか
+from (
+    select
+    id_bioguide,
+    date_part('century',  min(term_start)) first_century,
+    count(term_start) total_terms -- 単純に任期をカウントする
+from legislators_terms
+group by 1
+     ) a
+group by 1
+;
+
+-- 累積計算
+with ten_years_from_first_term as (
+    select
+        distinct id_bioguide,
+        first_value(term_type) over (partition by id_bioguide order by term_start) first_type,
+        min(term_start) over (partition by id_bioguide) first_term,
+        min(term_start) over (partition by id_bioguide) + interval '10 years' first_plus_10 -- 初期の任期開始から10年間のintervalを設ける
+    from legislators_terms
+)
+select
+    date_part('century', a.first_term) century, -- 世紀ごとに
+    first_type, -- 上院or下院
+    count(distinct a.id_bioguide) cohort,  -- ユニークな議員数
+    count(b.term_start) terms -- 世紀ごとの行数
+from ten_years_from_first_term a
+left join legislators_terms b on a.id_bioguide = b.id_bioguide
+and b.term_start between a.first_term and a.first_plus_10 -- 同じ議員について10年以内の行を集計対象にする
+group by 1,2 -- どのようにコホートにしたいかはグループで決定する。
+;
+
+
+-- date_dim自体にnullなし。
+select * from date_dim where date is null;
+
+-- 下記sqlでdateになるが発生。最終的な結果にもdateがnullで集計される事象発生->結果セットの歪み。
+select distinct a.id_bioguide, a.term_start, a.term_end,
+                b.date orig_date,
+                coalesce(b.date, date_trunc('year', a.term_start) + interval '1 year - 1 day') date
+from legislators_terms a
+left join date_dim b
+    on b.date between a.term_start and a.term_end -- 任期開始日と終了日の年度を全てjoin
+    and b.month_name = 'December' and b.day_of_month = 31 -- ただし、その１年分は12/31だけ残す
+    and b.year <= 2019
+where b.date is null
+order by 1,2;
+-- 下記のように年末まで就任してないand1年未満の条件下で、left joinなのでnullが発生。
+-- このような場合はビジネス上どのように対応するか決まっていればそれで対応。除外or1年とみなす、orその他
+-- 一年とみなすなら、その年の年末を設定してあげれば良い。
+/*
+id_bioguide,date,term_start,term_end
+A000083,,1881-03-04,1881-10-04
+A000130,,1889-03-04,1889-11-11
+*/
+
+-- 年度ごとの議員の任期年数の割合を出してみる
+with all_years_by_each as (
+    select distinct a.id_bioguide,
+    coalesce(b.date, date_trunc('year', a.term_start) + interval '1 year - 1 day') date
+from legislators_terms a
+left join date_dim b
+    on b.date between a.term_start and a.term_end -- 任期開始日と終了日の年度を全てjoin
+    and b.month_name = 'December' and b.day_of_month = 31 -- ただし、その１年分は12/31だけ残す
+    and b.year <= 2019
+order by 1,2
+),
+
+-- all_years_by_eachは任期のstartとendした見ないため、任期間に空白等がある場合は考慮しない点に注意。
+-- 例えば、id_bioguide=A000014
+
+cume_years_t as (
+    select
+    id_bioguide, date,
+    count(date) over (
+        partition by id_bioguide
+        order by date
+        rows between unbounded preceding and current row
+        ) cume_years
+from all_years_by_each
+),
+/*
+id_bioguide,date,cume_years
+A000001,1951-12-31,1
+A000001,1952-12-31,2
+A000002,1947-12-31,1
+A000002,1948-12-31,2
+...
+*/
+n_legislators_t as (
+    select
+        id_bioguide,
+        date,
+        count(distinct id_bioguide) n_legislators
+    from cume_years_t
+    group by 1,2
+),
+-- コホートに分ける前にカウントすると連続値のカテゴリ数が膨大になってわかりにくい。
+-- 下記のように扱い切れるカテゴリに分類するとよい。
+/*
+date,cume_years,n_legislators
+1996-12-31,20,18
+1996-12-31,21,1
+1996-12-31,22,18
+1996-12-31,23,2
+1996-12-31,24,19
+...
+*/
+n_legislators_t2 as (
+    select
+        date,
+        case when cume_years <= 4 then '1 to 4'
+             when cume_years <= 10 then '5 to 10'
+             when cume_years <= 20 then '11 to 20'
+             else '21+' end tenure,
+        count(distinct id_bioguide) legislators
+        from cume_years_t
+    group by 1,2
+    )
+select
+    date,tenure,
+    legislators / sum(legislators) over (partition by date) pct_legislators
+from n_legislators_t2
+order by 1 desc
+;
+
+-- 任期が連続してない議員を特定する
+-- 特に任期に空白が出ているdateを特定
+with all_years_by_each as (
+    select distinct a.id_bioguide, b.date
+    from legislators_terms a
+    left join date_dim b
+        on b.date between a.term_start and a.term_end -- 任期開始日と終了日の年度を全てjoin
+        and b.month_name = 'December' and b.day_of_month = 31 -- ただし、その１年分は12/31だけ残す
+        and b.year <= 2019
+    order by 1,2
+),
+with_continuous_flag as (
+    select
+        id_bioguide,date,
+        coalesce(
+            age(date, lag(date) over (partition by id_bioguide order by date)) = interval '1 year',true
+        ) continuous_flag
+    from all_years_by_each
+),
+with_flag as (
+    select
+        id_bioguide, date,
+        coalesce (
+            not continuous_flag or
+            not lead(continuous_flag) over (partition by id_bioguide order by date), false
+        ) flag
+    from with_continuous_flag
+)
+select id_bioguide,date
+from with_flag
+where flag
+;
